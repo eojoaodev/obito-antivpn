@@ -1,0 +1,104 @@
+# ============================================
+#
+#        █████╗ ███╗   ██╗████████╗██╗
+#       ██╔══██╗████╗  ██║╚══██╔══╝██║
+#       ███████║██╔██╗ ██║   ██║   ██║
+#       ██╔══██║██║╚██╗██║   ██║   ██║
+#       ██║  ██║██║ ╚████║   ██║   ██║
+#       ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝
+#
+#            ██╗   ██╗██████╗ ███╗   ██╗
+#            ██║   ██║██╔══██╗████╗  ██║
+#            ██║   ██║██████╔╝██╔██╗ ██║
+#            ╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║
+#             ╚████╔╝ ██║     ██║ ╚████║
+#              ╚═══╝  ╚═╝     ╚═╝  ╚═══╝
+#
+# ============================================
+#   Site:     https://obitouchiha.cloud/
+#   GitHub:   https://github.com/eojoaodev
+# ============================================
+#   Compatível com Spigot/Bukkit 1.8 ~ 1.21
+# ============================================
+
+# ------------------------------------------
+#  PROVEDOR DE API
+# ------------------------------------------
+# Qual serviço detecta VPN/Proxy
+#   iphub      → iphub.info       (recomendado)
+#   proxycheck → proxycheck.io    (alternativa)
+#
+api-provider: iphub
+
+# ------------------------------------------
+#  IPHUB.INFO
+# ------------------------------------------
+# Sem chave:        1.000 verificações/dia
+# Com chave grátis: limite maior
+# Crie sua chave:   https://iphub.info/
+#
+iphub-key: ""
+
+# Nível de bloqueio:
+#   1 = Bloqueia VPN e Proxy confirmados     (recomendado)
+#   2 = Bloqueia VPN, Proxy e IPs suspeitos  (mais agressivo)
+#
+iphub-block-level: 1
+
+# ------------------------------------------
+#  PROXYCHECK.IO  (só se api-provider: proxycheck)
+# ------------------------------------------
+# Crie sua chave: https://proxycheck.io/
+#
+proxycheck-key: ""
+
+# ------------------------------------------
+#  RESTRIÇÃO POR PAÍS
+# ------------------------------------------
+# Permitir apenas jogadores com IP do Brasil?
+#   true  → Bloqueia qualquer IP fora do BR
+#   false → Permite qualquer país
+#
+brazil-only: true
+
+# ------------------------------------------
+#  MENSAGENS DE KICK
+# ------------------------------------------
+# Códigos de cor: &c vermelho  &a verde   &e amarelo
+#                 &7 cinza     &f branco  &b azul claro
+#                 &l negrito   &n sublinhado
+
+# Mensagem para VPN/Proxy detectado
+kick-message: |
+  &c&lVPN / Proxy Detectado!
+  &7Desative sua VPN para entrar no servidor.
+  &8Se achar que é um engano, entre em contato.
+
+# Mensagem para país bloqueado (brazil-only: true)
+kick-message-country: |
+  &c&lAcesso Bloqueado!
+  &7Apenas jogadores do Brasil podem entrar.
+
+# ------------------------------------------
+#  CACHE  (banco de dados SQLite)
+# ------------------------------------------
+# Tempo em HORAS antes de verificar o IP novamente.
+# Recomendado: entre 12 e 48 horas.
+#
+cache-duration-hours: 24
+
+# ------------------------------------------
+#  ERRO NA API
+# ------------------------------------------
+#   false → Deixa entrar  (recomendado)
+#   true  → Bloqueia por precaução
+#
+block-on-api-error: false
+
+# ------------------------------------------
+#  NOTIFICAÇÕES PARA ADMINS
+# ------------------------------------------
+# Avisa admins com permissão antivpn.notify
+# quando alguém for bloqueado.
+#
+notify-admins: true

@@ -1,0 +1,20 @@
+name: obito-antivpn
+version: 1.0.0
+main: com.antivpn.Main
+author: eojoaodev
+website: obitouchiha.cloud
+commands:
+  antivpn:
+    usage: /antivpn
+    permission: antivpn.admin
+
+permissions:
+  antivpn.admin:
+    description: Acesso aos comandos
+    default: op
+  antivpn.bypass:
+    description: Entra mesmo com VPN
+    default: op
+  antivpn.notify:
+    description: Recebe alertas de kick
+    default: op
