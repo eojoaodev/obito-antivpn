@@ -2,211 +2,254 @@ package com.antivpn.managers;
 
 import com.antivpn.Main;
 import com.antivpn.database.DatabaseManager;
-import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class VPNChecker {
 
     private final Main plugin;
 
-    // ISPs residenciais conhecidos — risco quase zero de VPN
-    private static final String[] TRUSTED_ISPS = {
-            "vivo", "claro", "tim", "oi ", "net ", "algar", "sercomtel",
-            "brisanet", "desktop", "winity", "comcast", "at&t", "verizon",
-            "charter", "spectrum", "cox", "bt ", "virgin", "vodafone",
-            "telefonica", "telecom"
-    };
+    // Contador de falhas consecutivas da API primária
+    private final AtomicInteger primaryFailures = new AtomicInteger(0);
+    private static final int MAX_FAILURES_BEFORE_WARN = 3;
 
     public VPNChecker(Main plugin) {
         this.plugin = plugin;
     }
 
     /**
-     * Verifica o jogador de forma completamente síncrona
-     * dentro do AsyncPlayerPreLoginEvent.
-     * Não precisa de runTaskAsynchronously aqui!
+     * Verificação síncrona — segura pois AsyncPlayerPreLoginEvent já roda em thread assíncrona.
      */
     public CheckResult checkSync(String playerName, String ip) {
         DatabaseManager db = plugin.getDatabaseManager();
+        CacheManager cache = plugin.getCacheManager();
 
-        // 1. Whitelist por Nick
+        // 1. Whitelist Nick
         if (db.isWhitelistedNick(playerName)) {
             return CheckResult.ALLOWED;
         }
 
-        // 2. Whitelist por IP
+        // 2. Whitelist IP
         if (db.isWhitelistedIP(ip)) {
             return CheckResult.ALLOWED;
         }
 
-        // 3. Verifica cache do SQLite
-        DatabaseManager.CacheResult cached = db.getCache(ip);
-        if (cached != null) {
-            if (cached.isVPN) {
-                return CheckResult.BLOCKED_VPN;
+        // 3. Cache L1 (memória)
+        DatabaseManager.CacheResult cached = cache.getFromMemory(ip);
+
+        // 4. Cache L2 (SQLite) — só busca se L1 não achou
+        if (cached == null) {
+            cached = db.getCache(ip);
+            if (cached != null) {
+                cache.promoteToMemory(ip, cached);
             }
-            // Verifica restrição de país pelo cache
-            if (plugin.getConfig().getBoolean("brazil-only", false)) {
-                if (cached.countryCode != null && !cached.countryCode.isEmpty() && !cached.countryCode.equalsIgnoreCase("BR")) {
-                    return CheckResult.BLOCKED_COUNTRY;
-                }
-            }
-            return CheckResult.ALLOWED;
         }
 
-        // 4. Consulta a API (já estamos em thread assíncrono pelo AsyncPlayerPreLoginEvent)
+        if (cached != null) {
+            return evaluateResult(cached);
+        }
+
+        // 5. Consulta API
+        return queryWithFallback(ip);
+    }
+
+    /**
+     * Avalia o resultado do cache e aplica as regras de bloqueio.
+     */
+    private CheckResult evaluateResult(DatabaseManager.CacheResult result) {
+        if (result.isVPN) return CheckResult.BLOCKED_VPN;
+
+        if (plugin.getConfig().getBoolean("brazil-only", false)) {
+            if (!result.countryCode.isEmpty() && !result.countryCode.equalsIgnoreCase("BR")) {
+                return CheckResult.BLOCKED_COUNTRY;
+            }
+        }
+
+        return CheckResult.ALLOWED;
+    }
+
+    /**
+     * Consulta a API primária, com fallback automático para a secundária.
+     */
+    private CheckResult queryWithFallback(String ip) {
+        String primary   = plugin.getConfig().getString("api-provider", "iphub");
+        boolean fallback = plugin.getConfig().getBoolean("api-fallback", true);
+
+        // Tenta API primária
         try {
-            APIResult apiResult = queryAPI(ip);
+            APIResult result = query(primary, ip);
+            primaryFailures.set(0); // reset contador de falhas
+            saveAndReturn(ip, result);
+            return evaluateAPIResult(result);
 
-            // Salva no cache SQLite
-            plugin.getCacheManager().addToCache(
-                    ip,
-                    apiResult.isVPN,
-                    apiResult.countryCode,
-                    apiResult.isp
-            );
+        } catch (Exception primaryError) {
+            primaryFailures.incrementAndGet();
 
-            // Verifica ISP confiável (camada de inteligência local)
-            if (apiResult.isVPN && isTrustedISP(apiResult.isp)) {
-                plugin.getLogger().warning("[AntiVPN] IP " + ip + " marcado como VPN mas ISP parece residencial: "
-                        + apiResult.isp + " — permitindo com aviso.");
-                return CheckResult.ALLOWED;
+            if (primaryFailures.get() >= MAX_FAILURES_BEFORE_WARN) {
+                plugin.getLogger().warning(
+                        "[AntiVPN] API primária (" + primary + ") falhou " +
+                                primaryFailures.get() + "x seguidas: " + primaryError.getMessage()
+                );
             }
 
-            if (apiResult.isVPN) return CheckResult.BLOCKED_VPN;
+            // Tenta fallback se habilitado
+            if (fallback) {
+                String fallbackProvider = primary.equalsIgnoreCase("iphub") ? "proxycheck" : "iphub";
+                try {
+                    plugin.getLogger().info("[AntiVPN] Tentando fallback: " + fallbackProvider + " para IP: " + ip);
+                    APIResult result = query(fallbackProvider, ip);
+                    saveAndReturn(ip, result);
+                    return evaluateAPIResult(result);
 
-            // Verifica restrição de país
-            if (plugin.getConfig().getBoolean("brazil-only", false)) {
-                if (apiResult.countryCode != null && !apiResult.countryCode.isEmpty() && !apiResult.countryCode.equalsIgnoreCase("BR")) {
-                    return CheckResult.BLOCKED_COUNTRY;
+                } catch (Exception fallbackError) {
+                    plugin.getLogger().warning(
+                            "[AntiVPN] Fallback (" + fallbackProvider + ") também falhou: " + fallbackError.getMessage()
+                    );
                 }
             }
 
-            return CheckResult.ALLOWED;
-
-        } catch (Exception e) {
-            plugin.getLogger().warning("[AntiVPN] Erro na API para IP " + ip + ": " + e.getMessage());
+            // Ambas falharam — aplica política de erro
             boolean blockOnError = plugin.getConfig().getBoolean("block-on-api-error", false);
+            plugin.getLogger().warning("[AntiVPN] Sem resposta de API para " + ip +
+                    " — " + (blockOnError ? "bloqueando" : "permitindo") + " por política.");
             return blockOnError ? CheckResult.BLOCKED_VPN : CheckResult.ALLOWED;
         }
     }
 
-    private boolean isTrustedISP(String isp) {
-        if (isp == null || isp.isEmpty()) return false;
-        String ispLower = isp.toLowerCase();
-        for (String trusted : TRUSTED_ISPS) {
-            if (ispLower.contains(trusted)) return true;
-        }
-        return false;
+    private void saveAndReturn(String ip, APIResult result) {
+        plugin.getCacheManager().addToCache(ip, result.isVPN, result.countryCode, result.isp, result.blockValue);
     }
 
-    private APIResult queryAPI(String ip) throws Exception {
-        String provider = plugin.getConfig().getString("api-provider", "iphub");
-        if (provider.equalsIgnoreCase("iphub")) {
-            return checkIPHub(ip);
-        } else if (provider.equalsIgnoreCase("proxycheck")) {
-            return checkProxyCheck(ip);
+    private CheckResult evaluateAPIResult(APIResult result) {
+        if (result.isVPN) return CheckResult.BLOCKED_VPN;
+
+        if (plugin.getConfig().getBoolean("brazil-only", false)) {
+            if (!result.countryCode.isEmpty() && !result.countryCode.equalsIgnoreCase("BR")) {
+                return CheckResult.BLOCKED_COUNTRY;
+            }
         }
-        return new APIResult(false, "", "");
+
+        return CheckResult.ALLOWED;
     }
 
-    private APIResult checkIPHub(String ip) throws Exception {
+    private APIResult query(String provider, String ip) throws Exception {
+        switch (provider.toLowerCase()) {
+            case "iphub":      return queryIPHub(ip);
+            case "proxycheck": return queryProxyCheck(ip);
+            default:
+                throw new IllegalArgumentException("Provider desconhecido: " + provider);
+        }
+    }
+
+    private APIResult queryIPHub(String ip) throws Exception {
         String apiKey = plugin.getConfig().getString("iphub-key", "");
-        HttpURLConnection conn = createConnection("https://v2.api.iphub.info/ip/" + ip);
+        int timeout   = plugin.getConfig().getInt("api-timeout-seconds", 5) * 1000;
+
+        HttpURLConnection conn = openConnection("https://v2.api.iphub.info/ip/" + ip, timeout);
         if (!apiKey.isEmpty()) conn.setRequestProperty("X-Key", apiKey);
 
-        if (conn.getResponseCode() != 200) return new APIResult(false, "", "");
+        int code = conn.getResponseCode();
+        if (code == 429) throw new Exception("IPHub rate limit atingido (429)");
+        if (code != 200) throw new Exception("IPHub retornou HTTP " + code);
 
-        String response = readResponse(conn);
+        String response = readBody(conn);
 
-        // Extrai countryCode
-        String countryCode = extractJSON(response, "countryCode");
+        String countryCode = extractString(response, "countryCode");
+        String isp         = extractString(response, "isp");
+        int    blockValue  = extractInt(response, "block");
 
-        // Extrai ISP
-        String isp = extractJSON(response, "isp");
-
-        // Verifica block level
         int blockLevel = plugin.getConfig().getInt("iphub-block-level", 1);
-        boolean isVPN;
-        if (blockLevel == 2) {
-            isVPN = response.contains("\"block\":1") || response.contains("\"block\":2");
-        } else {
-            isVPN = response.contains("\"block\":1");
-        }
+        boolean isVPN  = blockLevel >= 2
+                ? blockValue >= 1
+                : blockValue == 1;
 
-        return new APIResult(isVPN, countryCode, isp);
+        return new APIResult(isVPN, countryCode, isp, blockValue);
     }
 
-    private APIResult checkProxyCheck(String ip) throws Exception {
+    private APIResult queryProxyCheck(String ip) throws Exception {
         String apiKey = plugin.getConfig().getString("proxycheck-key", "");
+        int timeout   = plugin.getConfig().getInt("api-timeout-seconds", 5) * 1000;
+
         String url = "https://proxycheck.io/v2/" + ip + "?vpn=1&asn=1";
         if (!apiKey.isEmpty()) url += "&key=" + apiKey;
 
-        HttpURLConnection conn = createConnection(url);
-        if (conn.getResponseCode() != 200) return new APIResult(false, "", "");
+        HttpURLConnection conn = openConnection(url, timeout);
 
-        String response = readResponse(conn);
-        boolean isVPN = response.contains("\"proxy\":\"yes\"") || response.contains("\"vpn\":\"yes\"");
-        String countryCode = extractJSON(response, "country");
-        String isp = extractJSON(response, "provider");
+        int code = conn.getResponseCode();
+        if (code != 200) throw new Exception("ProxyCheck retornou HTTP " + code);
 
-        return new APIResult(isVPN, countryCode, isp);
+        String response  = readBody(conn);
+        boolean isVPN    = response.contains("\"proxy\":\"yes\"") || response.contains("\"vpn\":\"yes\"");
+        String country   = extractString(response, "country");
+        String isp       = extractString(response, "provider");
+
+        return new APIResult(isVPN, country, isp, isVPN ? 1 : 0);
     }
 
-    /**
-     * Extrai valor simples de um JSON sem biblioteca externa
-     * Ex: {"countryCode":"BR"} → "BR"
-     */
-    private String extractJSON(String json, String key) {
+
+    private HttpURLConnection openConnection(String urlStr, int timeout) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(timeout);
+        conn.setReadTimeout(timeout);
+        conn.setRequestProperty("User-Agent", "AntiVPN/" + plugin.getDescription().getVersion());
+        conn.setRequestProperty("Accept", "application/json");
+        return conn;
+    }
+
+    private String readBody(HttpURLConnection conn) throws Exception {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) sb.append(line);
+            return sb.toString();
+        }
+    }
+
+    private String extractString(String json, String key) {
         String search = "\"" + key + "\":\"";
         int start = json.indexOf(search);
         if (start == -1) return "";
         start += search.length();
-        int end = json.indexOf("\"", start);
-        if (end == -1) return "";
-        return json.substring(start, end);
+        int end = json.indexOf('"', start);
+        return end == -1 ? "" : json.substring(start, end);
     }
 
-    private HttpURLConnection createConnection(String urlStr) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-        conn.setRequestMethod("GET");
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(5000);
-        conn.setRequestProperty("User-Agent", "AntiVPN-Plugin/2.0");
-        return conn;
+    private int extractInt(String json, String key) {
+        String search = "\"" + key + "\":";
+        int start = json.indexOf(search);
+        if (start == -1) return 0;
+        start += search.length();
+        int end = start;
+        while (end < json.length() && Character.isDigit(json.charAt(end))) end++;
+        try {
+            return Integer.parseInt(json.substring(start, end));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
-    private String readResponse(HttpURLConnection conn) throws Exception {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) sb.append(line);
-        reader.close();
-        return sb.toString();
-    }
-
-    // Enum de resultado da verificação
     public enum CheckResult {
         ALLOWED,
         BLOCKED_VPN,
         BLOCKED_COUNTRY
     }
 
-    // Classe interna para resultado da API
     private static class APIResult {
         final boolean isVPN;
-        final String countryCode;
-        final String isp;
+        final String  countryCode;
+        final String  isp;
+        final int     blockValue;
 
-        APIResult(boolean isVPN, String countryCode, String isp) {
-            this.isVPN = isVPN;
-            this.countryCode = countryCode;
-            this.isp = isp;
+        APIResult(boolean isVPN, String countryCode, String isp, int blockValue) {
+            this.isVPN       = isVPN;
+            this.countryCode = countryCode != null ? countryCode : "";
+            this.isp         = isp != null ? isp : "";
+            this.blockValue  = blockValue;
         }
     }
 }

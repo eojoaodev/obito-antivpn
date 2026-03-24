@@ -24,11 +24,24 @@
 # ------------------------------------------
 #  PROVEDOR DE API
 # ------------------------------------------
-# Qual serviço detecta VPN/Proxy
+# API principal para detecção de VPN/Proxy.
+#
 #   iphub      → iphub.info       (recomendado)
 #   proxycheck → proxycheck.io    (alternativa)
 #
 api-provider: iphub
+
+# Se a API principal falhar, tenta a outra automaticamente?
+#   true  → Sim, tenta o fallback (recomendado)
+#   false → Não, aplica block-on-api-error
+#
+api-fallback: true
+
+# Timeout de conexão com a API (em segundos)
+# Valores muito baixos podem causar falsos negativos
+# em servidores com latência alta.
+#
+api-timeout-seconds: 5
 
 # ------------------------------------------
 #  IPHUB.INFO
@@ -39,15 +52,22 @@ api-provider: iphub
 #
 iphub-key: ""
 
-# Nível de bloqueio:
-#   1 = Bloqueia VPN e Proxy confirmados     (recomendado)
-#   2 = Bloqueia VPN, Proxy e IPs suspeitos  (mais agressivo)
+# Nível de bloqueio do IPHub:
+#
+#   1 → Bloqueia block=1 (VPN/Proxy confirmado)     ← recomendado
+#   2 → Bloqueia block=1 e block=2 (+ Datacenters)  ← mais agressivo
+#
+# O campo `block` do IPHub já considera ASN, roteamento
+# e comportamento do IP — confiamos 100% nele.
 #
 iphub-block-level: 1
 
 # ------------------------------------------
-#  PROXYCHECK.IO  (só se api-provider: proxycheck)
+#  PROXYCHECK.IO
 # ------------------------------------------
+# Usado como API primária (se api-provider: proxycheck)
+# ou como fallback automático (se api-fallback: true).
+#
 # Crie sua chave: https://proxycheck.io/
 #
 proxycheck-key: ""
@@ -55,42 +75,61 @@ proxycheck-key: ""
 # ------------------------------------------
 #  RESTRIÇÃO POR PAÍS
 # ------------------------------------------
-# Permitir apenas jogadores com IP do Brasil?
-#   true  → Bloqueia qualquer IP fora do BR
-#   false → Permite qualquer país
+# Permite apenas IPs do Brasil?
 #
-brazil-only: true
+#   true  → Bloqueia qualquer IP fora do BR
+#   false → Permite qualquer país (só bloqueia VPN/Proxy)
+#
+# Atenção: IPs com countryCode vazio (ex: resposta incompleta
+# da API) nunca são bloqueados por país — apenas VPNs confirmadas.
+#
+brazil-only: false
 
 # ------------------------------------------
 #  MENSAGENS DE KICK
 # ------------------------------------------
-# Códigos de cor: &c vermelho  &a verde   &e amarelo
-#                 &7 cinza     &f branco  &b azul claro
-#                 &l negrito   &n sublinhado
-
-# Mensagem para VPN/Proxy detectado
+# Suporte a múltiplas linhas com |
+# Códigos de cor: &c &a &e &7 &f &b &l &n &o
+#
 kick-message: |
   &c&lVPN / Proxy Detectado!
   &7Desative sua VPN para entrar no servidor.
   &8Se achar que é um engano, entre em contato.
 
-# Mensagem para país bloqueado (brazil-only: true)
 kick-message-country: |
   &c&lAcesso Bloqueado!
   &7Apenas jogadores do Brasil podem entrar.
 
 # ------------------------------------------
-#  CACHE  (banco de dados SQLite)
+#  CACHE
 # ------------------------------------------
-# Tempo em HORAS antes de verificar o IP novamente.
-# Recomendado: entre 12 e 48 horas.
+# O cache tem duas camadas:
+#   L1 (memória RAM) — acesso instantâneo, temporário
+#   L2 (SQLite)      — persistente entre reinicios
+#
+# Tempo em HORAS para manter um IP em cache.
+# Após expirar, o IP é verificado novamente na API.
 #
 cache-duration-hours: 24
+
+# Limite máximo de entradas no cache em memória (L1).
+# IPs acima desse limite só vão pro SQLite (L2).
+# Ajuste conforme a RAM disponível do servidor.
+#
+max-memory-cache-size: 5000
+
+# Intervalo em MINUTOS para limpeza automática de entradas expiradas.
+# A limpeza roda de forma assíncrona — zero lag.
+#
+cleanup-interval-minutes: 30
 
 # ------------------------------------------
 #  ERRO NA API
 # ------------------------------------------
-#   false → Deixa entrar  (recomendado)
+# O que fazer se TODAS as APIs falharem?
+# (só relevante se api-fallback: false ou ambas falharem)
+#
+#   false → Deixa entrar  (recomendado — evita falsos bloqueios)
 #   true  → Bloqueia por precaução
 #
 block-on-api-error: false
@@ -98,7 +137,17 @@ block-on-api-error: false
 # ------------------------------------------
 #  NOTIFICAÇÕES PARA ADMINS
 # ------------------------------------------
-# Avisa admins com permissão antivpn.notify
-# quando alguém for bloqueado.
+# Envia mensagem no chat para admins com permissão
+# antivpn.notify quando alguém for bloqueado.
 #
 notify-admins: true
+
+# ------------------------------------------
+#  LOG EM ARQUIVO
+# ------------------------------------------
+# Salva todos os bloqueios em plugins/AntiVPN/blocks.log
+# e na tabela block_log do SQLite.
+#
+# O log usa uma fila interna — não impacta performance.
+#
+log-to-file: true
